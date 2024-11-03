@@ -15,10 +15,10 @@ public class PagedResponse<T> : GenericResponse<T>
 
     public PagedResponse(T data, int currentPage, int pageSize, int totalCount) : base(data)
     {
-        this.CurrentPage = currentPage;
-        this.PageSize = pageSize;
-        this.TotalCount = totalCount;
-        this.TotalPages = (int)Math.Ceiling(totalCount / (double)pageSize);
+        CurrentPage = currentPage;
+        PageSize = pageSize;
+        TotalCount = totalCount;
+        TotalPages = (int)Math.Ceiling(totalCount / (double)pageSize);
     }
 }
 
@@ -39,7 +39,7 @@ namespace JourneyHub.Api.Controllers
         [Authorize]
         public async Task<IActionResult> CreateTripAsync([FromBody] PostTripRequestDto tripDto)
         {
-            string userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+            string userId = GetUserId();
             Trip trip = await _tripService.CreateTripAsync(tripDto, userId);
             return Ok(new GenericResponse<Trip>(trip));
         }
@@ -54,13 +54,10 @@ namespace JourneyHub.Api.Controllers
 
         [HttpGet("user-trips")]
         [Authorize]
-        public async Task<IActionResult> GetUserTripsAsync([FromQuery] int pageNumber = 1,
-            [FromQuery] int pageSize = 10)
+        public async Task<IActionResult> GetUserTripsAsync([FromQuery] int pageNumber = 1, [FromQuery] int pageSize = 10)
         {
-            string userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
-
+            string userId = GetUserId();
             var (trips, totalCount) = await _tripService.GetTripsByUserIdAsync(userId, pageNumber, pageSize);
-
             var response = new PagedResponse<IEnumerable<GetTripsResponseDto>>(trips, pageNumber, pageSize, totalCount);
             return Ok(response);
         }
@@ -69,27 +66,27 @@ namespace JourneyHub.Api.Controllers
         public async Task<IActionResult> GetTripByIdAsync(int id)
         {
             var trip = await _tripService.GetTripByIdAsync(id);
-            if (trip == null)
-            {
-                return NotFound();
-            }
-
-            return Ok(new GenericResponse<Trip>(trip));
+            return trip != null ? Ok(new GenericResponse<Trip>(trip)) : NotFoundResponse<Trip>();
         }
 
         [HttpDelete("{id}")]
         [Authorize]
         public async Task<IActionResult> DeleteTripAsync(int id)
         {
-            string userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
-
+            string userId = GetUserId();
             var result = await _tripService.DeleteTripAsync(id, userId);
-            if (!result)
-            {
-                return NotFound();
-            }
+            return result ? Ok() : NotFoundResponse<string>();
+        }
 
-            return Ok();
+        // Helper Methods
+        private string GetUserId()
+        {
+            return User.FindFirstValue(ClaimTypes.NameIdentifier);
+        }
+
+        private IActionResult NotFoundResponse<T>()
+        {
+            return NotFound();
         }
     }
 }
