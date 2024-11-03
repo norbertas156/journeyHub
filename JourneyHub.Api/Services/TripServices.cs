@@ -1,6 +1,7 @@
 ﻿using AutoMapper;
 using JourneyHub.Api.Services.Interfaces;
 using JourneyHub.Common.Constants;
+using JourneyHub.Common.Exceptions;
 using JourneyHub.Common.Models.Domain;
 using JourneyHub.Common.Models.Dtos.Requests;
 using JourneyHub.Common.Models.Dtos.Responses;
@@ -8,7 +9,6 @@ using JourneyHub.Data;
 using Microsoft.EntityFrameworkCore;
 using System.Net.Http.Headers;
 using System.Text.RegularExpressions;
-using JourneyHub.Common.Exceptions;
 
 namespace JourneyHub.Api.Services
 {
@@ -16,18 +16,26 @@ namespace JourneyHub.Api.Services
     {
         private readonly AppDbContext _context;
         private readonly IMapper _mapper;
+        private readonly HttpClient _httpClient;
 
-        public TripServices(AppDbContext context, IMapper mapper)
+        private const string PatternCountry = @"""\bcountry\b"":""([^""]+)""";
+        private const string PatternCity = @"""\bcity\b"":""([^""]+)""";
+
+        public TripServices(AppDbContext context, IMapper mapper, HttpClient httpClient)
         {
             _context = context;
             _mapper = mapper;
+            _httpClient = ConfigureHttpClient(httpClient);
         }
 
         public async Task<Trip> CreateTripAsync(PostTripRequestDto tripDto, string userId)
         {
-            Trip trip = _mapper.Map<Trip>(tripDto);
+            if (tripDto.MapPoints == null || !tripDto.MapPoints.Any())
+                throw new BadRequestException("MapPoints cannot be empty.");
+
+            var trip = _mapper.Map<Trip>(tripDto);
             trip.UserId = userId;
-            trip.Area = await getAreaByCoordinatesAsync(tripDto.MapPoints[0]);
+            trip.Area = await GetAreaByCoordinatesAsync(tripDto.MapPoints[0]);
 
             _context.Trips.Add(trip);
             await _context.SaveChangesAsync();
@@ -35,115 +43,100 @@ namespace JourneyHub.Api.Services
             return trip;
         }
 
-
-        public async Task<(IEnumerable<GetTripsResponseDto>, int)> GetTripsByUserIdAsync(string userId, int pageNumber,
-            int pageSize)
+        public async Task<(IEnumerable<GetTripsResponseDto>, int)> GetTripsByUserIdAsync(string userId, int pageNumber, int pageSize)
         {
-            var query = _context.Trips.Where(t => t.UserId == userId);
-
-            var totalTrips = await query.CountAsync();
-            var trips = await query.Skip((pageNumber - 1) * pageSize)
-                .Take(pageSize)
-                .AsNoTracking()
-                .Select(trip => new GetTripsResponseDto
-                {
-                    Id = trip.Id,
-                    RouteName = trip.RouteName,
-                    RouteDescription = trip.RouteDescription,
-                    Area = trip.Area,
-                    Distance = trip.Distance,
-                    Duration = trip.Duration,
-                    Images = trip.Images,
-                })
-                .ToListAsync();
+            var tripsQuery = _context.Trips.Where(t => t.UserId == userId);
+            var totalTrips = await tripsQuery.CountAsync();
+            var trips = await PaginateTripsAsync(tripsQuery, pageNumber, pageSize);
 
             return (trips, totalTrips);
         }
 
         public async Task<(IEnumerable<GetTripsResponseDto>, int)> GetTripsPagedAsync(int pageNumber, int pageSize)
         {
-            var query = _context.Trips.Where(trip => !trip.IsPrivate);
+            var tripsQuery = _context.Trips.Where(trip => !trip.IsPrivate);
+            var totalTrips = await tripsQuery.CountAsync();
+            var trips = await PaginateTripsAsync(tripsQuery, pageNumber, pageSize);
 
-            var totalTrips = await query.CountAsync();
-            var trips = await query.Skip((pageNumber - 1) * pageSize)
-                .Take(pageSize)
-                .AsNoTracking()
-                .Select(trip => new GetTripsResponseDto
-                {
-                    Id = trip.Id,
-                    RouteName = trip.RouteName,
-                    RouteDescription = trip.RouteDescription,
-                    Area = trip.Area,
-                    Distance = trip.Distance,
-                    Duration = trip.Duration,
-                    Images = trip.Images,
-                })
-                .ToListAsync();
             return (trips, totalTrips);
         }
 
-
         public async Task<Trip> GetTripByIdAsync(int id)
         {
-            return await _context.Trips.FindAsync(id);
+            var trip = await _context.Trips.FindAsync(id);
+
+            return trip;
         }
 
         public async Task<bool> DeleteTripAsync(int id, string userId)
         {
-            var trip = await _context.Trips.FindAsync(id);
-
-            if (trip == null)
-            {
-                return false;
-            }
-
+            var trip = await GetTripByIdAsync(id);
             if (trip.UserId != userId)
-            {
-                throw new UnauthorizedException(ErrorMessages.Unauthorized_Trip_Deletion, 403);
-            }
+                throw new UnauthorizedException(ErrorMessages.Unauthorized_Trip_Deletion);
 
             _context.Trips.Remove(trip);
             await _context.SaveChangesAsync();
-
             return true;
         }
 
         public async Task DeleteAllTripsByUserIdAsync(string userId)
         {
-            var userTrips = _context.Trips.Where(t => t.UserId == userId).ToList();
+            var userTrips = await _context.Trips.Where(t => t.UserId == userId).ToListAsync();
             _context.Trips.RemoveRange(userTrips);
             await _context.SaveChangesAsync();
         }
 
-        public async Task<AreaInfo> getAreaByCoordinatesAsync(MapPoint MapPoint)
+        private HttpClient ConfigureHttpClient(HttpClient client)
         {
-            string _address = "https://nominatim.openstreetmap.org/reverse?lat=" + MapPoint.Lat.ToString() + "&lon=" +
-                              MapPoint.Lng.ToString() + "&format=json";
+            client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("ScraperBot", "1.0"));
+            client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("(+http://www.example.com/ScraperBot.html)"));
+            return client;
+        }
 
-            var client = new HttpClient();
+        private async Task<IEnumerable<GetTripsResponseDto>> PaginateTripsAsync(IQueryable<Trip> query, int pageNumber, int pageSize)
+        {
+            var trips = await query.Skip((pageNumber - 1) * pageSize)
+                                   .Take(pageSize)
+                                   .AsNoTracking()
+                                   .ToListAsync();
+            return _mapper.Map<IEnumerable<GetTripsResponseDto>>(trips);
+        }
 
-            var productValue = new ProductInfoHeaderValue("ScraperBot", "1.0");
-            var commentValue = new ProductInfoHeaderValue("(+http://www.example.com/ScraperBot.html)");
+        public async Task<AreaInfo> GetAreaByCoordinatesAsync(MapPoint mapPoint)
+        {
+            var url = BuildNominatimUrl(mapPoint);
+            var responseContent = await SendHttpRequestAsync(url);
+            return ParseAreaInfo(responseContent);
+        }
 
-            client.DefaultRequestHeaders.UserAgent.Add(productValue);
-            client.DefaultRequestHeaders.UserAgent.Add(commentValue);
+        private string BuildNominatimUrl(MapPoint mapPoint)
+        {
+            return $"https://nominatim.openstreetmap.org/reverse?lat={mapPoint.Lat}&lon={mapPoint.Lng}&format=json";
+        }
 
-            client.BaseAddress = new Uri(_address);
-            HttpResponseMessage response = await client.GetAsync(new Uri(_address));
+        private async Task<string> SendHttpRequestAsync(string url)
+        {
+            var response = await _httpClient.GetAsync(url);
             response.EnsureSuccessStatusCode();
-            var result = await response.Content.ReadAsStringAsync();
+            return await response.Content.ReadAsStringAsync();
+        }
 
-            string patterncountry = @"""\bcountry\b"":""([^""]+)""";
-            string patterncity = @"""\bcity\b"":""([^""]+)""";
+        private AreaInfo ParseAreaInfo(string responseContent)
+        {
+            var countryName = ExtractMatch(responseContent, PatternCountry);
+            var cityName = ExtractMatch(responseContent, PatternCity);
 
-            Match matchCountry = Regex.Match(result, patterncountry);
-            string countryName = matchCountry.Groups[1].Value;
+            return new AreaInfo
+            {
+                Country = countryName,
+                City = cityName
+            };
+        }
 
-            Match matchCity = Regex.Match(result, patterncity);
-            string cityName = matchCity.Groups[1].Value;
-
-
-            return new AreaInfo { Country = countryName, City = cityName };
+        private string ExtractMatch(string input, string pattern)
+        {
+            var match = Regex.Match(input, pattern);
+            return match.Success ? match.Groups[1].Value : string.Empty;
         }
     }
 }

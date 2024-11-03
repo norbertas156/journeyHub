@@ -26,65 +26,74 @@ namespace JourneyHub.Api.Services
         public async Task<bool> DeleteCurrentUserAsync(string userId)
         {
             var user = await _userManager.FindByIdAsync(userId);
-            if (user == null)
-            {
-                return false;
-            }
-
             await _tripServices.DeleteAllTripsByUserIdAsync(userId);
 
+            if (user == null)
+                return false;
+
             var result = await _userManager.DeleteAsync(user);
+
             return result.Succeeded;
         }
 
         public async Task<IdentityUser> UpdateUserAsync(IdentityUser user, UserUpdateRequestDto userUpdateDto)
         {
-            string emailPattern = @"^\w+([-+.']\w+)*@\w+([-.]\w+)*\.\w+([-.]\w+)*$";
-            var mustUpdateCredentials = false;
-            
-            if (!string.IsNullOrEmpty(userUpdateDto.Email))
-            {
-                if (!Regex.IsMatch(userUpdateDto.Email, emailPattern))
-                    throw new BadRequestException("Invalid email format.");
 
-                user.Email = userUpdateDto.Email;
-                mustUpdateCredentials = true;
-            }
-
-            if (!string.IsNullOrEmpty(userUpdateDto.UserName))
-            {
-                var existingUserWithNewUsername = await _userManager.FindByNameAsync(userUpdateDto.UserName);
-                if (existingUserWithNewUsername != null && existingUserWithNewUsername.Id != user.Id)
-                    throw new BadRequestException("Username already taken.");
-
-                user.UserName = userUpdateDto.UserName;
-                mustUpdateCredentials = true;
-            }
-
-            if (mustUpdateCredentials)
-            {
-                var isUserUpdated = await _userManager.UpdateAsync(user);
-                if (!isUserUpdated.Succeeded)
-                    throw new BadRequestException(isUserUpdated.Errors.FirstOrDefault()?.Description);
-            }
-
-            if (!string.IsNullOrEmpty(userUpdateDto.NewPassword))
-            {
-                if (userUpdateDto.NewPassword != userUpdateDto.ConfirmNewPassword)
-                {
-                    throw new BadRequestException(ErrorMessages.Passwords_Do_Not_Match);
-                }
-                
-                var token = await _userManager.GeneratePasswordResetTokenAsync(user);
-                var isPasswordUpdated = await _userManager.ResetPasswordAsync(user, token, userUpdateDto.NewPassword);
-                
-                if (!isPasswordUpdated.Succeeded)
-                    throw new BadRequestException(isPasswordUpdated.Errors.FirstOrDefault()?.Description);
-            }
+            await UpdateEmailAsync(user, userUpdateDto.Email);
+            await UpdateUsernameAsync(user, userUpdateDto.UserName);
+            await UpdatePasswordAsync(user, userUpdateDto.NewPassword);
 
             return user;
         }
 
+        private async Task UpdateEmailAsync(IdentityUser user, string newEmail)
+        {
+            const string emailPattern = @"^\w+([-+.']\w+)*@\w+([-.]\w+)*\.\w+([-.]\w+)*$";
+
+            if (!Regex.IsMatch(newEmail, emailPattern))
+                throw new BadRequestException("Invalid email format.");
+
+            user.Email = newEmail;
+            await _userManager.UpdateAsync(user);
+        }
+
+        private async Task UpdateUsernameAsync(IdentityUser user, string newUsername)
+        {
+            await ValidateNewUsernameAsync(user, newUsername);
+
+            user.UserName = newUsername;
+            await UpdateUserAsync(user);
+        }
+
+        private async Task ValidateNewUsernameAsync(IdentityUser user, string newUsername)
+        {
+            var existingUserWithNewUsername = await _userManager.FindByNameAsync(newUsername);
+
+            if (existingUserWithNewUsername != null && existingUserWithNewUsername.Id != user.Id)
+            {
+                throw new BadRequestException("Username already taken.");
+            }
+        }
+
+        private async Task UpdateUserAsync(IdentityUser user)
+        {
+            var result = await _userManager.UpdateAsync(user);
+
+            if (!result.Succeeded)
+            {
+                var errorMessage = result.Errors.FirstOrDefault()?.Description ?? "Failed to update user.";
+                throw new BadRequestException(errorMessage);
+            }
+        }
+
+        private async Task UpdatePasswordAsync(IdentityUser user, string newPassword)
+        {
+            string? token = await _userManager.GeneratePasswordResetTokenAsync(user);
+            IdentityResult? result = await _userManager.ResetPasswordAsync(user, token, newPassword);
+
+            if (!result.Succeeded)
+                throw new BadRequestException(result.Errors.FirstOrDefault()?.Description);
+        }
 
         public async Task<bool> VerifyUserPasswordAsync(string userId, string password)
         {
