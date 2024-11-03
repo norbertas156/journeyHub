@@ -1,7 +1,6 @@
 ﻿using JourneyHub.Common.Constants;
 using JourneyHub.Common.Exceptions;
 using JourneyHub.Common.Models.Dtos.Requests;
-using JourneyHub.Common.Models.Dtos.Responses;
 using JourneyHub.Common.Options;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
@@ -22,51 +21,29 @@ namespace JourneyHub.Api.Controllers
 
         public AuthController(UserManager<IdentityUser> userManager, IOptions<JwtConfig> jwtConfig)
         {
-            _jwtConfig = jwtConfig.Value;
             _userManager = userManager;
+            _jwtConfig = jwtConfig.Value;
         }
 
-        [HttpPost]
-        [Route("Login")]
+        [HttpPost("Login")]
         public async Task<IActionResult> Login([FromBody] UserLoginRequestDto requestDto)
         {
-            if (!ModelState.IsValid)
-                throw new BadRequestException(ErrorMessages.Invalid_Payload);
+            ValidateModel();
 
-            var existingUser = await _userManager.FindByEmailAsync(requestDto.Email);
-            if (existingUser == null)
-                throw new BadRequestException(ErrorMessages.Invalid_Email);
+            var user = await FindUserByEmailAsync(requestDto.Email);
+            await VerifyPasswordAsync(user, requestDto.Password);
 
-            var isCorrect = await _userManager.CheckPasswordAsync(existingUser, requestDto.Password);
-            if (!isCorrect)
-                throw new BadRequestException(ErrorMessages.Invalid_Password);
-
-            var (token, expiration) = GenerateJwtToken(existingUser);
-            return Ok(new
-            {
-                Token = token, Expiration = expiration,
-                Email = existingUser.Email, Name = existingUser.UserName,
-                UserId = existingUser.Id
-            });
+            var tokenResult = GenerateJwtToken(user);
+            return Ok(CreateAuthResponse(user, tokenResult));
         }
 
-        [HttpPost]
-        [Route("Register")]
+        [HttpPost("Register")]
         public async Task<IActionResult> Register([FromBody] UserRegistrationRequestDto requestDto)
         {
-            if (!ModelState.IsValid)
-                throw new BadRequestException(ErrorMessages.Invalid_Payload);
+            ValidateModel();
 
-            var userExistsByUsername = await _userManager.FindByNameAsync(requestDto.Name);
-            if (userExistsByUsername != null)
-                throw new BadRequestException(ErrorMessages.Username_Taken);
-
-            var userExistsByEmail = await _userManager.FindByEmailAsync(requestDto.Email);
-            if (userExistsByEmail != null)
-                throw new BadRequestException(ErrorMessages.Email_Exists);
-
-            if (requestDto.Password != requestDto.ConfirmPassword)
-                throw new BadRequestException(ErrorMessages.Passwords_Do_Not_Match);
+            await ValidateUserDoesNotExist(requestDto);
+            VerifyPasswordsMatch(requestDto.Password, requestDto.ConfirmPassword);
 
             var newUser = new IdentityUser
             {
@@ -74,18 +51,55 @@ namespace JourneyHub.Api.Controllers
                 Email = requestDto.Email,
             };
 
-            var isCreated = await _userManager.CreateAsync(newUser, requestDto.Password);
+            await CreateUserAsync(newUser, requestDto.Password);
 
-            if (!isCreated.Succeeded)
-                throw new BadRequestException(string.Join("; ", isCreated.Errors.Select(e => e.Description)));
+            var tokenResult = GenerateJwtToken(newUser);
+            return Ok(CreateAuthResponse(newUser, tokenResult));
+        }
 
-            var (token, expiration) = GenerateJwtToken(newUser);
-            return Ok(new
-            {
-                Token = token, Expiration = expiration,
-                Email = newUser.Email, Name = requestDto.Name,
-                UserId = newUser.Id,
-            });
+        // Helper Methods
+        private void ValidateModel()
+        {
+            if (!ModelState.IsValid)
+                throw new BadRequestException(ErrorMessages.Invalid_Payload);
+        }
+
+        private async Task<IdentityUser> FindUserByEmailAsync(string email)
+        {
+            var user = await _userManager.FindByEmailAsync(email);
+            if (user == null)
+                throw new BadRequestException(ErrorMessages.Invalid_Email);
+
+            return user;
+        }
+
+        private async Task VerifyPasswordAsync(IdentityUser user, string password)
+        {
+            var isCorrect = await _userManager.CheckPasswordAsync(user, password);
+            if (!isCorrect)
+                throw new BadRequestException(ErrorMessages.Invalid_Password);
+        }
+
+        private async Task ValidateUserDoesNotExist(UserRegistrationRequestDto requestDto)
+        {
+            if (await _userManager.FindByNameAsync(requestDto.Name) != null)
+                throw new BadRequestException(ErrorMessages.Username_Taken);
+
+            if (await _userManager.FindByEmailAsync(requestDto.Email) != null)
+                throw new BadRequestException(ErrorMessages.Email_Exists);
+        }
+
+        private void VerifyPasswordsMatch(string password, string confirmPassword)
+        {
+            if (password != confirmPassword)
+                throw new BadRequestException(ErrorMessages.Passwords_Do_Not_Match);
+        }
+
+        private async Task CreateUserAsync(IdentityUser user, string password)
+        {
+            var result = await _userManager.CreateAsync(user, password);
+            if (!result.Succeeded)
+                throw new BadRequestException(string.Join("; ", result.Errors.Select(e => e.Description)));
         }
 
         private (string Token, DateTime Expiration) GenerateJwtToken(IdentityUser user)
@@ -111,9 +125,19 @@ namespace JourneyHub.Api.Controllers
             };
 
             var token = jwtTokenHandler.CreateToken(tokenDescriptor);
-            var tokenString = jwtTokenHandler.WriteToken(token);
+            return (jwtTokenHandler.WriteToken(token), expiration);
+        }
 
-            return (Token: tokenString, Expiration: expiration);
+        private object CreateAuthResponse(IdentityUser user, (string Token, DateTime Expiration) tokenResult)
+        {
+            return new
+            {
+                Token = tokenResult.Token,
+                Expiration = tokenResult.Expiration,
+                Email = user.Email,
+                Name = user.UserName,
+                UserId = user.Id
+            };
         }
     }
 }
